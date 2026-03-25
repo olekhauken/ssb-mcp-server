@@ -7,7 +7,8 @@ from starlette.applications import Starlette
 from starlette.routing import Route, Mount
 from starlette.requests import Request
 import uvicorn
-import json
+import itertools
+import os
 
 SSB_BASE = "https://data.ssb.no/api/pxwebapi/v2"
 
@@ -88,9 +89,12 @@ async def call_tool(name: str, arguments: dict):
                 return [TextContent(type="text", text=f"Ingen tabeller funnet for '{query}'.")]
             lines = [f"Fant {len(tables)} tabell(er) for '{query}':\n"]
             for t in tables:
-                lines.append(f"- ID: {t['id']} | {t['title']}")
-                if t.get("updated"):
-                    lines.append(f"  Oppdatert: {t['updated'][:10]}")
+                table_id = t.get("id", "")
+                label = t.get("label", t.get("title", "Uten tittel"))
+                updated = t.get("updated", t.get("lastUpdated", ""))
+                lines.append(f"- ID: {table_id} | {label}")
+                if updated:
+                    lines.append(f"  Oppdatert: {updated[:10]}")
             return [TextContent(type="text", text="\n".join(lines))]
 
         elif name == "get_table_metadata":
@@ -100,17 +104,30 @@ async def call_tool(name: str, arguments: dict):
             resp = await client.get(url, params=params)
             resp.raise_for_status()
             data = resp.json()
-            lines = [f"Tabell: {table_id} – {data.get('title', '')}\n"]
-            for var in data.get("variables", []):
-                lines.append(f"Variabel: {var['id']} ({var['text']})")
-                values = var.get("values", [])
-                texts = var.get("valueTexts", [])
-                shown = list(zip(values[:8], texts[:8]))
-                for code, label in shown:
+
+            title = data.get("label", data.get("title", table_id))
+            lines = [f"Tabell: {table_id} – {title}\n"]
+
+            dimension = data.get("dimension", {})
+            dim_ids = data.get("id", [])
+
+            for dim_id in dim_ids:
+                dim = dimension.get(dim_id, {})
+                dim_label = dim.get("label", dim_id)
+                category = dim.get("category", {})
+                index = category.get("index", {})
+                labels = category.get("label", {})
+
+                lines.append(f"Variabel: {dim_id} ({dim_label})")
+                codes = list(index.keys()) if isinstance(index, dict) else list(labels.keys())
+                shown = codes[:8]
+                for code in shown:
+                    label = labels.get(code, code)
                     lines.append(f"  {code}: {label}")
-                if len(values) > 8:
-                    lines.append(f"  ... og {len(values) - 8} til")
+                if len(codes) > 8:
+                    lines.append(f"  ... og {len(codes) - 8} til")
                 lines.append("")
+
             return [TextContent(type="text", text="\n".join(lines))]
 
         elif name == "query_ssb_table":
@@ -124,33 +141,25 @@ async def call_tool(name: str, arguments: dict):
             resp.raise_for_status()
             data = resp.json()
 
-            # Parse JSON-stat2
             dims = data.get("id", [])
             sizes = data.get("size", [])
             dim_info = data.get("dimension", {})
             values = data.get("value", [])
 
-            # Build readable output
-            lines = [f"Data fra tabell {table_id}:\n"]
+            lines = [f"Data fra tabell {table_id} – {data.get('label', '')}:\n"]
 
-            # Get dimension labels
             dim_labels = {}
             for dim in dims:
                 cats = dim_info.get(dim, {}).get("category", {})
-                labels = cats.get("label", {})
-                dim_labels[dim] = labels
+                dim_labels[dim] = cats.get("label", {})
 
-            # Simple flat output for small datasets
-            if len(values) <= 200:
-                import itertools
+            if len(values) <= 500:
                 ranges = [range(s) for s in sizes]
                 for i, combo in enumerate(itertools.product(*ranges)):
-                    if i >= 200:
-                        break
                     row_parts = []
                     for d, idx in zip(dims, combo):
                         codes = list(dim_labels[d].keys())
-                        label = dim_labels[d].get(codes[idx], codes[idx]) if idx < len(codes) else str(idx)
+                        label = dim_labels[d].get(codes[idx], str(idx)) if idx < len(codes) else str(idx)
                         row_parts.append(f"{d}: {label}")
                     val = values[i] if i < len(values) else None
                     lines.append(f"{' | '.join(row_parts)} → {val}")
@@ -186,6 +195,5 @@ def create_app():
 
 
 if __name__ == "__main__":
-    import os
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(create_app(), host="0.0.0.0", port=port)
